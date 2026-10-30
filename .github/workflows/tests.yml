@@ -1,0 +1,73 @@
+name: Assignment Portal CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests and create real report
+        id: tests
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          set +e
+          pytest -q --json-report --json-report-file=pytest-report.json
+          TEST_EXIT=$?
+          echo "exit_code=$TEST_EXIT" >> "$GITHUB_OUTPUT"
+          export PYTEST_EXIT_CODE="$TEST_EXIT"
+          python build_report.py
+          exit 0
+
+      - name: Send report to local computer receiver
+        if: always()
+        env:
+          LOCAL_RECEIVER_URL: ${{ secrets.LOCAL_RECEIVER_URL }}
+          REPORT_TOKEN: ${{ secrets.REPORT_TOKEN }}
+        run: |
+          if [ -z "$LOCAL_RECEIVER_URL" ]; then
+            echo "::warning::LOCAL_RECEIVER_URL is not configured; report was generated in the runner but not sent to the computer."
+            exit 0
+          fi
+          python - <<'PY'
+          import json, os, urllib.request
+          url = os.environ["LOCAL_RECEIVER_URL"].rstrip("/") + "/report"
+          token = os.environ.get("REPORT_TOKEN", "")
+          data = open("test-report.json", "rb").read()
+          headers = {"Content-Type": "application/json"}
+          if token:
+              headers["X-Report-Token"] = token
+          req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+          with urllib.request.urlopen(req, timeout=20) as response:
+              print(response.status, response.read().decode())
+          PY
+
+      - name: Fail workflow if any test failed
+        if: always()
+        run: |
+          if [ "${{ steps.tests.outputs.exit_code }}" != "0" ]; then
+            echo "Tests failed. See the test report above."
+            exit 1
+          fi
